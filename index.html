@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agenda Ferretería</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+</head>
+<body>
+  <header class="top">
+    <h1>Agenda Ferretería</h1>
+    <div class="auth">
+      <span id="authEstado" class="muted">Sin conectar</span>
+      <button id="btnConectar" class="btn">Conectar Google Calendar</button>
+      <button id="btnDesconectar" class="btn ghost hidden">Desconectar</button>
+    </div>
+  </header>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab active" data-tab="agenda">Agenda</button>
+    <button class="tab" data-tab="reparaciones">Reparaciones</button>
+    <button class="tab" data-tab="llaves">Llaves en bruto</button>
+    <button class="tab" data-tab="ajustes">Ajustes</button>
+  </nav>
+
+  <main>
+    <!-- AGENDA -->
+    <section id="tab-agenda" class="panel">
+      <div class="grid2">
+        <form id="formCita" class="card">
+          <h2>Nueva cita</h2>
+          <label>Tipo
+            <select name="tipo" id="citaTipo">
+              <option value="ferreteria">Ferretería</option>
+              <option value="reparacion">Reparación</option>
+            </select>
+          </label>
+          <label>Asunto <input name="titulo" required placeholder="Ej.: Copia de llaves comunidad, Presupuesto persiana…"></label>
+          <div class="row">
+            <label>Fecha <input type="date" name="fecha" required></label>
+            <label>Hora <input type="time" name="hora" required value="10:00"></label>
+            <label>Duración
+              <select name="duracion">
+                <option value="15">15 min</option>
+                <option value="30" selected>30 min</option>
+                <option value="60">1 h</option>
+                <option value="120">2 h</option>
+              </select>
+            </label>
+          </div>
+          <div class="row">
+            <label>Cliente <input name="cliente" placeholder="Nombre"></label>
+            <label>Teléfono <input name="telefono" type="tel" placeholder="600 000 000"></label>
+          </div>
+          <div id="camposReparacion" class="hidden">
+            <div class="row">
+              <label>Artículo <input name="articulo" placeholder="Ej.: Taladro Bosch, cerradura…"></label>
+              <label>Presupuesto (€) <input name="presupuesto" type="number" step="0.01" min="0"></label>
+            </div>
+            <label>Estado
+              <select name="estado">
+                <option>Recibido</option>
+                <option>En reparación</option>
+                <option>Esperando pieza</option>
+                <option>Listo para recoger</option>
+                <option>Entregado</option>
+              </select>
+            </label>
+          </div>
+          <label>Notas <textarea name="notas" rows="2"></textarea></label>
+          <button class="btn" type="submit">Guardar en Google Calendar</button>
+        </form>
+
+        <div class="card">
+          <div class="card-head">
+            <h2>Próximas citas</h2>
+            <div class="row tight">
+              <select id="filtroAgenda">
+                <option value="todas">Todas</option>
+                <option value="ferreteria">Ferretería</option>
+                <option value="reparacion">Reparaciones</option>
+              </select>
+              <select id="rangoAgenda">
+                <option value="7">7 días</option>
+                <option value="30" selected>30 días</option>
+                <option value="90">90 días</option>
+              </select>
+              <button id="btnRecargar" class="btn ghost" type="button">↻</button>
+            </div>
+          </div>
+          <div id="listaCitas" class="lista"><p class="muted">Conecta Google Calendar para ver tus citas.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- REPARACIONES -->
+    <section id="tab-reparaciones" class="panel hidden">
+      <div class="card">
+        <div class="card-head">
+          <h2>Reparaciones</h2>
+          <div class="row tight">
+            <select id="filtroEstado">
+              <option value="pendientes">Pendientes (no entregadas)</option>
+              <option value="todas">Todas</option>
+              <option>Recibido</option>
+              <option>En reparación</option>
+              <option>Esperando pieza</option>
+              <option>Listo para recoger</option>
+              <option>Entregado</option>
+            </select>
+            <button id="btnRecargarRep" class="btn ghost" type="button">↻</button>
+          </div>
+        </div>
+        <p class="muted small">Muestra reparaciones de los últimos 120 días y los próximos 120.</p>
+        <div id="listaReparaciones" class="lista"><p class="muted">Conecta Google Calendar para ver las reparaciones.</p></div>
+      </div>
+    </section>
+
+    <!-- LLAVES -->
+    <section id="tab-llaves" class="panel hidden">
+      <div class="card">
+        <h2>Buscar llave en bruto</h2>
+        <form id="formLlave" class="row">
+          <input id="refLlave" placeholder="Referencia (ej.: TE8, AZ15, FAC5D…)" required autocomplete="off">
+          <button class="btn" type="submit">Buscar en todos</button>
+        </form>
+        <p class="muted small">"Buscar en todos" abre una pestaña por proveedor. Si el navegador solo abre una, permite las ventanas emergentes para esta página.</p>
+        <div id="botonesProveedores" class="chips"></div>
+        <div id="historial" class="historial"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>Proveedores</h2>
+          <div class="row tight">
+            <button id="btnExportar" class="btn ghost" type="button">Exportar</button>
+            <label class="btn ghost file">Importar<input id="inpImportar" type="file" accept="application/json" hidden></label>
+          </div>
+        </div>
+        <div id="listaProveedores" class="lista"></div>
+        <form id="formProveedor" class="prov-form">
+          <input type="hidden" name="id">
+          <label>Nombre <input name="nombre" required placeholder="Ej.: Ibermadrid"></label>
+          <label>URL de búsqueda (usa {q} donde va la referencia)
+            <input name="url" required placeholder="https://www.proveedor.es/buscar?q={q}">
+          </label>
+          <div class="row tight">
+            <button class="btn" type="submit" id="btnGuardarProv">Añadir proveedor</button>
+            <button class="btn ghost hidden" type="button" id="btnCancelarProv">Cancelar</button>
+          </div>
+        </form>
+        <details class="ayuda">
+          <summary>Cómo sacar la URL de búsqueda de un proveedor</summary>
+          <ol>
+            <li>Entra en la web del proveedor (con tu usuario, si es zona profesional).</li>
+            <li>Busca una referencia cualquiera, por ejemplo <code>TE8</code>.</li>
+            <li>Copia la dirección de la página de resultados, p. ej. <code>https://web.es/buscar?q=TE8</code>.</li>
+            <li>Sustituye <code>TE8</code> por <code>{q}</code> → <code>https://web.es/buscar?q={q}</code> y pégala aquí.</li>
+          </ol>
+          <p>Si la dirección no cambia al buscar (la web busca sin cambiar la URL), deja la búsqueda en Google que viene por defecto.</p>
+        </details>
+      </div>
+    </section>
+
+    <!-- AJUSTES -->
+    <section id="tab-ajustes" class="panel hidden">
+      <div class="card">
+        <h2>Conexión con Google</h2>
+        <label>ID de cliente OAuth de Google
+          <input id="inpClientId" placeholder="xxxxxxxx.apps.googleusercontent.com">
+        </label>
+        <p class="muted small">Se crea una sola vez en Google Cloud Console. Los pasos están en el README del repositorio.</p>
+        <button id="btnGuardarClientId" class="btn" type="button">Guardar</button>
+      </div>
+      <div class="card">
+        <h2>Calendarios</h2>
+        <p class="muted small">Puedes usar el mismo calendario para las dos cosas o uno distinto para cada una. Las citas se diferencian por color y etiqueta.</p>
+        <label>Calendario de Ferretería <select id="selCalFerreteria"><option value="primary">Principal</option></select></label>
+        <label>Calendario de Reparaciones <select id="selCalReparaciones"><option value="primary">Principal</option></select></label>
+        <button id="btnGuardarCalendarios" class="btn" type="button">Guardar calendarios</button>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="app.js"></script>
+</body>
+</html>
