@@ -43,7 +43,9 @@
           <div class="row">
             <label>Fecha <input type="date" name="fecha" required></label>
             <label>Hora <input type="time" name="hora" required></label>
+            <button type="button" class="btn ghost" data-ahora="formRegistro" title="Poner la fecha y hora actuales">🕒 Ahora</button>
           </div>
+          <p id="avisoHoraReg" class="muted small">La hora se actualiza sola mientras no la cambies.</p>
           <div class="row">
             <label>Cliente <input name="cliente" list="dlClientes" autocomplete="off" placeholder="Nombre"></label>
             <label>Teléfono <input name="telefono" type="tel" placeholder="600 000 000"></label>
@@ -126,6 +128,7 @@
           <div class="row">
             <label>Fecha <input type="date" name="fecha" required></label>
             <label>Hora <input type="time" name="hora" required value="10:00"></label>
+            <button type="button" class="btn ghost" data-ahora="formCita" title="Poner la fecha y hora actuales">🕒 Ahora</button>
             <label>Duración
               <select name="duracion">
                 <option value="15">15 min</option>

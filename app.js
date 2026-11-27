@@ -407,9 +407,29 @@ function autocompletarTelefono(form) {
 /* ---------- formulario ---------- */
 const formReg = $('#formRegistro');
 autocompletarTelefono(formReg);
+
+/* ---------- hora de la visita: se actualiza sola hasta que se cambia a mano ---------- */
+let horaRegManual = false;
+function ponerAhora(form) { form.fecha.value = hoyISO(); form.hora.value = horaAhora(); }
+const horaRegAutomatica = () => !formReg.id.value && !horaRegManual; // no en edición ni si se cambió a mano
+function avisoHoraReg() {
+  $('#avisoHoraReg').textContent = formReg.id.value ? 'Editando: se mantiene la fecha original. Pulsa "Ahora" para cambiarla.'
+    : horaRegManual ? 'Hora puesta a mano. Pulsa "Ahora" para volver a la hora actual.'
+      : 'La hora se actualiza sola mientras no la cambies.';
+}
+['fecha', 'hora'].forEach((n) => formReg[n].addEventListener('input', () => { horaRegManual = true; avisoHoraReg(); }));
+setInterval(() => { if (horaRegAutomatica()) ponerAhora(formReg); }, 15000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden && horaRegAutomatica()) ponerAhora(formReg); });
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('[data-ahora]');
+  if (!b) return;
+  const form = document.getElementById(b.dataset.ahora);
+  ponerAhora(form);
+  if (form === formReg) { horaRegManual = false; avisoHoraReg(); }
+});
 function resetFormRegistro() {
   formReg.reset(); formReg.id.value = '';
-  formReg.fecha.value = hoyISO(); formReg.hora.value = horaAhora();
+  ponerAhora(formReg); horaRegManual = false; avisoHoraReg();
   selEtiquetasForm.clear(); pintarEtiquetas();
   ponerOperador(formReg.operador, operadorActual());
   $('#tituloFormRegistro').textContent = 'Nueva visita a la tienda';
@@ -421,6 +441,7 @@ $('#btnCancelarRegistro').addEventListener('click', resetFormRegistro);
 formReg.addEventListener('submit', async (e) => {
   e.preventDefault();
   if (!hojaOk) { toast('Conecta con Google primero.'); return; }
+  if (horaRegAutomatica()) ponerAhora(formReg);
   const f = Object.fromEntries(new FormData(formReg));
   const esNuevo = !f.id;
   const r = {
@@ -452,6 +473,7 @@ function editarRegistro(r) {
   });
   pintarEtiquetas();
   $('#tituloFormRegistro').textContent = 'Editar visita';
+  avisoHoraReg();
   $('#btnGuardarRegistro').textContent = 'Guardar cambios';
   $('#btnCancelarRegistro').classList.remove('hidden');
   formReg.scrollIntoView({ behavior: 'smooth', block: 'start' });
