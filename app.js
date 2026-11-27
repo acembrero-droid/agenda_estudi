@@ -28,11 +28,13 @@ const TIPOS = {
 const ESTADOS_REP = ['Recibido', 'En reparación', 'Esperando pieza', 'Listo para recoger', 'Entregado'];
 
 const HOJAS = {
-  Registro: ['ID', 'Fecha', 'Cliente', 'Teléfono', 'Necesidad', 'Etiquetas', 'Estado', 'Notas'],
+  Registro: ['ID', 'Fecha', 'Cliente', 'Teléfono', 'Necesidad', 'Etiquetas', 'Estado', 'Notas', 'Operador'],
   Etiquetas: ['Etiqueta'],
   Plantillas: ['Nombre', 'Texto'],
   Proveedores: ['Nombre', 'URL de búsqueda', 'Activo'],
+  Operadores: ['Nombre', 'Color'],
 };
+const NOMBRE_CARPETA = 'Agenda Ferretería – Fotos';
 
 const ETIQUETAS_INICIALES = ['Encargo', 'Urgente', 'Fontanería', 'Electricidad', 'Cerrajería', 'Pintura', 'Jardín', 'Presupuesto'];
 
@@ -43,7 +45,7 @@ const PLANTILLAS_INICIALES = [
   { nombre: 'Recordatorio de cita', texto: 'Hola {cliente}, le recordamos su cita en {tienda} el {fecha} a las {hora}.\nUn saludo.' },
   { nombre: 'Mensaje libre', texto: 'Hola {cliente}, le escribimos de {tienda}.\n' },
 ];
-const VARS_WA = ['cliente', 'fecha', 'hora', 'articulo', 'presupuesto', 'direccion', 'necesidad', 'tienda'];
+const VARS_WA = ['cliente', 'fecha', 'hora', 'articulo', 'presupuesto', 'direccion', 'necesidad', 'tienda', 'operador'];
 const VARS_SIEMPRE = ['cliente', 'tienda']; // si están vacías no se quita la línea
 
 const PROVEEDORES_INICIALES = [
@@ -188,11 +190,17 @@ $('#btnConectar').addEventListener('click', async () => {
   // Calendario y hoja se preparan por separado: si una falla, la otra sigue funcionando.
   cargarCalendarios().then(cargarAgenda).catch((e) => toast(e.message));
   iniciarHoja();
+  cargarFotos().then(repintarConFotos).catch(() => { /* las fotos son opcionales */ });
+  if (fotoPendiente) {
+    $('#avisoFoto').classList.add('hidden');
+    abrirFotos(fotoPendiente.ref, fotoPendiente.titulo);
+    fotoPendiente = null;
+  }
 });
 
 $('#btnDesconectar').addEventListener('click', () => {
   if (token && window.google?.accounts?.oauth2) google.accounts.oauth2.revoke(token, () => {});
-  token = null; hojaOk = false; store.set('conectado', false); pintarAuth();
+  token = null; hojaOk = false; fotosPorRef = new Map(); store.set('conectado', false); pintarAuth();
   $('#listaCitas').innerHTML = '<p class="muted">Desconectado.</p>';
   $('#listaReparaciones').innerHTML = '<p class="muted">Desconectado.</p>';
   $('#listaRegistro').innerHTML = '<p class="muted">Desconectado.</p>';
@@ -227,15 +235,17 @@ async function cargarMetaHoja() {
   gids = {};
   m.sheets.forEach((s) => { gids[s.properties.title] = s.properties.sheetId; });
   const faltan = Object.keys(HOJAS).filter((t) => !(t in gids));
-  if (!faltan.length) return;
-  const r = await api(`${SHEETS_API}/${hojaId}:batchUpdate`, {
-    method: 'POST',
-    body: JSON.stringify({ requests: faltan.map((t) => ({ addSheet: { properties: { title: t, gridProperties: { frozenRowCount: 1 } } } })) }),
-  });
-  r.replies.forEach((rep) => { const p = rep.addSheet.properties; gids[p.title] = p.sheetId; });
+  if (faltan.length) {
+    const r = await api(`${SHEETS_API}/${hojaId}:batchUpdate`, {
+      method: 'POST',
+      body: JSON.stringify({ requests: faltan.map((t) => ({ addSheet: { properties: { title: t, gridProperties: { frozenRowCount: 1 } } } })) }),
+    });
+    r.replies.forEach((rep) => { const p = rep.addSheet.properties; gids[p.title] = p.sheetId; });
+  }
+  // Reescribe las cabeceras: así una hoja de una versión anterior recibe las columnas nuevas.
   await api(`${SHEETS_API}/${hojaId}/values:batchUpdate`, {
     method: 'POST',
-    body: JSON.stringify({ valueInputOption: 'RAW', data: faltan.map((t) => ({ range: `${t}!A1`, values: [HOJAS[t]] })) }),
+    body: JSON.stringify({ valueInputOption: 'RAW', data: Object.keys(HOJAS).map((t) => ({ range: `${t}!A1`, values: [HOJAS[t]] })) }),
   });
 }
 
@@ -279,7 +289,11 @@ async function iniciarHoja() {
 /* Etiquetas, plantillas y proveedores: la hoja manda; el navegador guarda una copia
    para funcionar antes de conectar. Si la hoja está vacía (primera vez), se rellena con la copia local. */
 async function sincronizarListas() {
-  const [eti, pla, pro] = await Promise.all([leer('Etiquetas!A2:A'), leer('Plantillas!A2:B'), leer('Proveedores!A2:C')]);
+  const [eti, pla, pro, ope] = await Promise.all([leer('Etiquetas!A2:A'), leer('Plantillas!A2:B'), leer('Proveedores!A2:C'), leer('Operadores!A2:B')]);
+  if (ope.length) operadores = ope.filter((f) => f[0]).map((f) => ({ nombre: String(f[0]).trim(), color: colorValido(f[1]) }));
+  else if (operadores.length) await reescribir('Operadores', operadores.map((o) => [o.nombre, o.color]));
+  store.set('operadores', operadores);
+  pintarOperadores();
   if (eti.length) etiquetas = eti.map((f) => String(f[0] || '').trim()).filter(Boolean);
   else await reescribir('Etiquetas', etiquetas.map((e) => [e]));
   if (pla.length) plantillas = pla.filter((f) => f[0]).map((f) => ({ nombre: f[0], texto: f[1] || '' }));
@@ -303,17 +317,18 @@ let etiquetas = store.get('etiquetas', null) || [...ETIQUETAS_INICIALES];
 const selEtiquetasForm = new Set();
 const filtroEtiquetas = new Set();
 
-const aFila = (r) => [r.id, r.fecha, r.cliente, r.telefono, r.necesidad, r.etiquetas.join(', '), r.estado, r.notas];
+const aFila = (r) => [r.id, r.fecha, r.cliente, r.telefono, r.necesidad, r.etiquetas.join(', '), r.estado, r.notas, r.operador || ''];
 const deFila = (f) => ({
   id: f[0] || '', fecha: f[1] || '', cliente: f[2] || '', telefono: f[3] || '', necesidad: f[4] || '',
   etiquetas: String(f[5] || '').split(',').map((s) => s.trim()).filter(Boolean), estado: f[6] || 'Pendiente', notas: f[7] || '',
+  operador: f[8] || '',
 });
 
-async function cargRegistrosRaw() { return (await leer('Registro!A2:H')).filter((f) => f[0]).map(deFila); }
+async function cargRegistrosRaw() { return (await leer('Registro!A2:I')).filter((f) => f[0]).map(deFila); }
 async function cargarRegistros() {
   if (!hojaOk) return;
   $('#listaRegistro').innerHTML = '<p class="muted">Cargando…</p>';
-  try { registros = await cargRegistrosRaw(); pintarRegistros(); pintarEtiquetas(); pintarClientes(); }
+  try { registros = await cargRegistrosRaw(); pintarRegistros(); pintarEtiquetas(); pintarClientes(); pintarSelectsOperador(); }
   catch (e) { $('#listaRegistro').innerHTML = `<p class="muted">${esc(e.message)}</p>`; }
 }
 async function filaDe(id) {
@@ -324,10 +339,10 @@ async function filaDe(id) {
 }
 async function guardarRegistro(r, esNuevo) {
   if (esNuevo) {
-    await api(rangoUrl('Registro!A:H') + ':append?valueInputOption=RAW&insertDataOption=INSERT_ROWS', { method: 'POST', body: JSON.stringify({ values: [aFila(r)] }) });
+    await api(rangoUrl('Registro!A:I') + ':append?valueInputOption=RAW&insertDataOption=INSERT_ROWS', { method: 'POST', body: JSON.stringify({ values: [aFila(r)] }) });
   } else {
     const n = await filaDe(r.id);
-    await api(rangoUrl(`Registro!A${n}:H${n}`) + '?valueInputOption=RAW', { method: 'PUT', body: JSON.stringify({ values: [aFila(r)] }) });
+    await api(rangoUrl(`Registro!A${n}:I${n}`) + '?valueInputOption=RAW', { method: 'PUT', body: JSON.stringify({ values: [aFila(r)] }) });
   }
 }
 async function borrarRegistro(id) {
@@ -396,6 +411,7 @@ function resetFormRegistro() {
   formReg.reset(); formReg.id.value = '';
   formReg.fecha.value = hoyISO(); formReg.hora.value = horaAhora();
   selEtiquetasForm.clear(); pintarEtiquetas();
+  ponerOperador(formReg.operador, operadorActual());
   $('#tituloFormRegistro').textContent = 'Nueva visita a la tienda';
   $('#btnGuardarRegistro').textContent = 'Guardar visita';
   $('#btnCancelarRegistro').classList.add('hidden');
@@ -410,6 +426,7 @@ formReg.addEventListener('submit', async (e) => {
   const r = {
     id: f.id || nuevoId(), fecha: `${f.fecha} ${f.hora}`, cliente: f.cliente.trim(), telefono: f.telefono.trim(),
     necesidad: f.necesidad.trim(), etiquetas: [...selEtiquetasForm], estado: f.estado, notas: f.notas.trim(),
+    operador: f.operador || '',
   };
   const boton = $('#btnGuardarRegistro'); boton.disabled = true;
   try {
@@ -427,6 +444,7 @@ function editarRegistro(r) {
   formReg.fecha.value = f || hoyISO(); formReg.hora.value = h || '';
   formReg.cliente.value = r.cliente; formReg.telefono.value = r.telefono;
   formReg.necesidad.value = r.necesidad; formReg.estado.value = r.estado; formReg.notas.value = r.notas;
+  ponerOperador(formReg.operador, r.operador);
   selEtiquetasForm.clear();
   r.etiquetas.forEach((e) => {
     if (!etiquetas.some((x) => norm(x) === norm(e))) etiquetas.push(e);
@@ -441,12 +459,15 @@ function editarRegistro(r) {
 
 /* ---------- búsqueda y listado ---------- */
 function filtrarRegistros() {
+  const orden = new Map(registros.map((r, i) => [r.id, i]));
   const palabras = norm($('#buscaTexto').value).split(/\s+/).filter(Boolean);
   const est = $('#buscaEstado').value;
+  const ope = $('#buscaOperador').value;
   const desde = $('#buscaDesde').value;
   const hasta = $('#buscaHasta').value;
   return registros.filter((r) => {
     if (est !== 'todos' && r.estado !== est) return false;
+    if (ope && r.operador !== ope) return false;
     const dia = r.fecha.slice(0, 10);
     if (desde && dia < desde) return false;
     if (hasta && dia > hasta) return false;
@@ -456,7 +477,7 @@ function filtrarRegistros() {
       if (!palabras.every((p) => texto.includes(p))) return false;
     }
     return true;
-  }).sort((a, b) => b.fecha.localeCompare(a.fecha));
+  }).sort((a, b) => b.fecha.localeCompare(a.fecha) || orden.get(b.id) - orden.get(a.id)); // mismo minuto: la última añadida primero
 }
 
 const MAX_MOSTRAR = 200;
@@ -468,7 +489,7 @@ function pintarRegistros() {
     <div class="item registro ${r.estado === 'Resuelto' ? 'resuelto' : ''}">
       <div class="linea1">
         <span class="titulo">${esc(r.cliente || 'Sin nombre')} · <span class="muted">${esc(fmtFechaRegistro(r.fecha))}</span></span>
-        <span class="etiqueta ${r.estado === 'Resuelto' ? 'listo' : 'estado'}">${esc(r.estado)}</span>
+        <span>${badgeOp(r.operador)} <span class="etiqueta ${r.estado === 'Resuelto' ? 'listo' : 'estado'}">${esc(r.estado)}</span></span>
       </div>
       <div class="texto">${esc(r.necesidad)}</div>
       ${r.etiquetas.length ? `<div class="chips mini">${r.etiquetas.map((e) => `<button type="button" class="chip tag" data-tagfiltro="${esc(e)}">${esc(e)}</button>`).join('')}</div>` : ''}
@@ -478,6 +499,7 @@ function pintarRegistros() {
         <button class="btn ghost small" data-reg="editar" data-id="${esc(r.id)}">Editar</button>
         <button class="btn ghost small" data-reg="estado" data-id="${esc(r.id)}">${r.estado === 'Resuelto' ? 'Marcar pendiente' : 'Marcar resuelto'}</button>
         ${r.telefono ? `<button class="btn ghost small wa" data-wa="reg:${esc(r.id)}">WhatsApp</button>` : ''}
+        ${botonFotos('reg:' + r.id, (r.cliente || 'Visita') + ' · ' + r.necesidad.split('\n')[0].slice(0, 40))}
         ${r.cliente || r.telefono ? `<button class="btn ghost small" data-reg="historial" data-id="${esc(r.id)}">Historial del cliente</button>` : ''}
         <button class="btn ghost small" data-reg="cita" data-id="${esc(r.id)}">Crear cita</button>
         <button class="btn ghost small danger" data-reg="borrar" data-id="${esc(r.id)}">Borrar</button>
@@ -485,9 +507,9 @@ function pintarRegistros() {
     </div>`).join('') : `<p class="muted">${registros.length ? 'Ninguna visita coincide con la búsqueda.' : 'Aún no hay visitas registradas.'}</p>`;
 }
 
-['#buscaTexto', '#buscaEstado', '#buscaDesde', '#buscaHasta'].forEach((s) => $(s).addEventListener('input', pintarRegistros));
+['#buscaTexto', '#buscaEstado', '#buscaOperador', '#buscaDesde', '#buscaHasta'].forEach((s) => $(s).addEventListener('input', pintarRegistros));
 $('#btnLimpiarBusqueda').addEventListener('click', () => {
-  $('#buscaTexto').value = ''; $('#buscaEstado').value = 'todos'; $('#buscaDesde').value = ''; $('#buscaHasta').value = '';
+  $('#buscaTexto').value = ''; $('#buscaEstado').value = 'todos'; $('#buscaOperador').value = ''; $('#buscaDesde').value = ''; $('#buscaHasta').value = '';
   filtroEtiquetas.clear(); pintarEtiquetas(); pintarRegistros();
 });
 $('#btnRecargarRegistro').addEventListener('click', () => { if (hojaOk) cargarRegistros(); else toast('Conecta con Google primero.'); });
@@ -525,7 +547,7 @@ document.addEventListener('click', async (e) => {
     }
     case 'historial':
       $('#buscaTexto').value = r.telefono ? r.telefono.replace(/\D/g, '') : r.cliente;
-      $('#buscaEstado').value = 'todos'; $('#buscaDesde').value = ''; $('#buscaHasta').value = '';
+      $('#buscaEstado').value = 'todos'; $('#buscaOperador').value = ''; $('#buscaDesde').value = ''; $('#buscaHasta').value = '';
       filtroEtiquetas.clear(); pintarEtiquetas(); pintarRegistros();
       $('#buscaTexto').scrollIntoView({ behavior: 'smooth', block: 'center' });
       break;
@@ -537,8 +559,11 @@ document.addEventListener('click', async (e) => {
       formCita.scrollIntoView({ behavior: 'smooth', block: 'start' });
       break;
     case 'borrar':
-      if (!confirm('¿Borrar esta visita del registro? No se puede deshacer.')) return;
-      try { await borrarRegistro(r.id); registros = registros.filter((x) => x.id !== r.id); pintarRegistros(); toast('Visita borrada'); }
+      if (!confirm('¿Borrar esta visita del registro? No se puede deshacer.' + (numFotos('reg:' + r.id) ? '\nTambién se borrarán sus fotos.' : ''))) return;
+      try {
+        await borrarRegistro(r.id); registros = registros.filter((x) => x.id !== r.id); pintarRegistros(); toast('Visita borrada');
+        await borrarFotosDe('reg:' + r.id);
+      }
       catch (err) { toast(err.message); }
       break;
   }
@@ -551,7 +576,7 @@ $('#inpClientId').value = store.get('clientId', '');
 $('#btnGuardarClientId').addEventListener('click', () => {
   const v = $('#inpClientId').value.trim();
   if (v && !v.endsWith('.apps.googleusercontent.com')) { toast('El ID debe terminar en .apps.googleusercontent.com'); return; }
-  store.set('clientId', v); tokenClient = null; token = null; pintarAuth();
+  store.set('clientId', v); tokenClient = null; token = null; pintarAuth(); pintarQRConfig();
   toast('ID guardado. Pulsa "Conectar con Google".');
 });
 $('#inpTienda').value = store.get('tienda', '');
@@ -592,6 +617,7 @@ function datosDe(ev, calendario) {
     titulo: p.fr_titulo || ev.summary || '(sin título)',
     cliente: p.fr_cliente || '', telefono: p.fr_telefono || '', articulo: p.fr_articulo || '',
     presupuesto: p.fr_presupuesto || '', estado: p.fr_estado || '', direccion: p.fr_direccion || ev.location || '',
+    operador: p.fr_operador || '',
     notas: p.fr_notas ?? (ev.description || ''), link: ev.htmlLink, privado: p,
   };
 }
@@ -609,12 +635,14 @@ function descripcion(d) {
     d.articulo && 'Artículo: ' + d.articulo,
     d.presupuesto && 'Presupuesto: ' + d.presupuesto + ' €',
     d.estado && 'Estado: ' + d.estado,
+    d.operador && 'Operador: ' + d.operador,
     d.notas && '\n' + d.notas,
   ].filter(Boolean).join('\n');
 }
 function privado(d) {
   return {
     fr_tipo: d.tipo, fr_titulo: d.titulo, fr_cliente: d.cliente, fr_telefono: d.telefono, fr_direccion: d.direccion || '',
+    fr_operador: d.operador || '',
     fr_articulo: d.articulo, fr_presupuesto: String(d.presupuesto || ''), fr_estado: d.estado,
     fr_notas: (d.notas || '').slice(0, 1000), // Google limita cada propiedad a 1024 caracteres
   };
@@ -642,7 +670,6 @@ autocompletarTelefono(formCita);
 function camposPorTipo() {
   const t = $('#citaTipo').value;
   $('#camposReparacion').classList.toggle('hidden', t !== 'reparacion');
-  $('#camposVisita').classList.toggle('hidden', t !== 'visita');
 }
 $('#citaTipo').addEventListener('change', camposPorTipo);
 
@@ -651,7 +678,7 @@ formCita.addEventListener('submit', async (e) => {
   const f = Object.fromEntries(new FormData(formCita));
   const d = {
     tipo: f.tipo, titulo: f.titulo.trim(), cliente: f.cliente.trim(), telefono: f.telefono.trim(),
-    direccion: f.tipo === 'visita' ? f.direccion.trim() : '',
+    direccion: f.direccion.trim(), operador: f.operador || '',
     articulo: f.tipo === 'reparacion' ? f.articulo.trim() : '',
     presupuesto: f.tipo === 'reparacion' ? f.presupuesto : '',
     estado: f.tipo === 'reparacion' ? f.estado : '', notas: f.notas.trim(),
@@ -673,6 +700,7 @@ formCita.addEventListener('submit', async (e) => {
     });
     toast('Cita guardada en Google Calendar');
     const tipo = formCita.tipo.value; formCita.reset(); formCita.tipo.value = tipo; formCita.fecha.value = f.fecha; camposPorTipo();
+    ponerOperador(formCita.operador, operadorActual());
     cargarAgenda();
   } catch (err) { toast(err.message); }
   finally { boton.disabled = false; }
@@ -691,7 +719,7 @@ function htmlItem(d) {
   return `<div class="item ${d.tipo}">
     <div class="linea1">
       <span class="titulo">${d.todoElDia ? 'Todo el día' : fmtHora(d.inicio)} · ${esc(d.tipo === 'reparacion' ? (d.articulo || d.titulo) : d.titulo)}</span>
-      <span><span class="etiqueta ${d.tipo}">${TIPOS[d.tipo].nombre}</span> ${etiquetaEstado}</span>
+      <span>${badgeOp(d.operador)} <span class="etiqueta ${d.tipo}">${TIPOS[d.tipo].nombre}</span> ${etiquetaEstado}</span>
     </div>
     ${d.cliente || d.telefono ? `<div class="meta">${esc(d.cliente)}${tel}</div>` : ''}
     ${mapa}
@@ -700,6 +728,7 @@ function htmlItem(d) {
     <div class="acciones">
       ${selEstado}
       ${d.telefono ? `<button class="btn ghost small wa" data-wa="ev:${esc(d.cal + '|' + d.id)}">WhatsApp</button>` : ''}
+      ${botonFotos('ev:' + d.id, (d.cliente ? d.cliente + ' · ' : '') + (d.articulo || d.titulo))}
       ${d.link ? `<a class="btn ghost small" href="${esc(d.link)}" target="_blank" rel="noopener">Abrir en Calendar</a>` : ''}
       <button class="btn ghost small danger" data-accion="borrar" data-id="${esc(d.id)}" data-cal="${esc(d.cal)}">Borrar</button>
     </div>
@@ -716,7 +745,8 @@ function agrupadoPorDia(lista) {
 }
 const aplicarFiltroAgenda = (lista) => {
   const f = $('#filtroAgenda').value;
-  return f === 'todas' ? lista : lista.filter((d) => d.tipo === f);
+  const o = $('#filtroOperadorAgenda').value;
+  return lista.filter((d) => (f === 'todas' || d.tipo === f) && (!o || d.operador === o));
 };
 
 /* ---------- vista lista / mes ---------- */
@@ -803,7 +833,7 @@ $('#mesSiguiente').addEventListener('click', () => moverMes(1));
 $('#mesHoy').addEventListener('click', () => { mes = new Date(); mes.setDate(1); mes.setHours(0, 0, 0, 0); diaSel = hoyISO(); cargarMes(); });
 
 $('#btnRecargar').addEventListener('click', cargarAgenda);
-$('#filtroAgenda').addEventListener('change', () => { if (vista === 'mes' && eventosMes.length) pintarMes(); else cargarAgenda(); });
+['#filtroAgenda', '#filtroOperadorAgenda'].forEach((s) => $(s).addEventListener('change', () => { if (vista === 'mes' && eventosMes.length) pintarMes(); else cargarAgenda(); }));
 $('#rangoAgenda').addEventListener('change', cargarAgenda);
 
 /* ---------- reparaciones ---------- */
@@ -855,11 +885,12 @@ document.addEventListener('change', async (e) => {
 document.addEventListener('click', async (e) => {
   const el = e.target.closest('[data-accion="borrar"]');
   if (!el) return;
-  if (!confirm('¿Borrar esta cita de Google Calendar?')) return;
+  if (!confirm('¿Borrar esta cita de Google Calendar?' + (numFotos('ev:' + el.dataset.id) ? '\nTambién se borrarán sus fotos.' : ''))) return;
   try {
     await cal(`/calendars/${encodeURIComponent(el.dataset.cal)}/events/${encodeURIComponent(el.dataset.id)}`, { method: 'DELETE' });
     toast('Cita borrada');
     refrescarVistasEventos();
+    await borrarFotosDe('ev:' + el.dataset.id);
   } catch (err) { toast(err.message); }
 });
 
@@ -889,9 +920,10 @@ function ctxEvento(d) {
   return {
     cliente: d.cliente, telefono: d.telefono, fecha: fmtDia(d.inicio), hora: d.todoElDia ? '' : fmtHora(d.inicio),
     articulo: d.articulo, presupuesto: d.presupuesto, direccion: d.direccion, necesidad: d.titulo,
+    operador: d.operador || operadorActual(),
   };
 }
-function ctxRegistro(r) { return { cliente: r.cliente, telefono: r.telefono, necesidad: r.necesidad }; }
+function ctxRegistro(r) { return { cliente: r.cliente, telefono: r.telefono, necesidad: r.necesidad, operador: r.operador || operadorActual() }; }
 
 function abrirWA(ctx, preferida) {
   waCtx = ctx;
@@ -972,6 +1004,328 @@ document.addEventListener('click', (e) => {
     f.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
 });
+
+/* =====================================================================
+   OPERADORES (quién atiende): color propio y nombre en cada registro
+   ===================================================================== */
+const PALETA = ['#2563eb', '#db2777', '#16a34a', '#ea580c', '#7c3aed', '#0891b2', '#ca8a04', '#dc2626'];
+let operadores = store.get('operadores', []);
+const colorValido = (c) => (/^#[0-9a-f]{6}$/i.test(String(c || '')) ? c : '#888888');
+function textoSobre(hex) {
+  const n = parseInt(colorValido(hex).slice(1), 16);
+  const lum = (0.299 * (n >> 16 & 255) + 0.587 * (n >> 8 & 255) + 0.114 * (n & 255)) / 255;
+  return lum > 0.6 ? '#111111' : '#ffffff';
+}
+const operadorActual = () => { const n = store.get('operador', ''); return operadores.some((o) => o.nombre === n) ? n : ''; };
+const colorOperador = (n) => colorValido(operadores.find((o) => o.nombre === n)?.color);
+function badgeOp(n) {
+  if (!n) return '';
+  const c = colorOperador(n);
+  return `<span class="op" style="--c:${c};--ct:${textoSobre(c)}">${esc(n)}</span>`;
+}
+function aplicarTemaOperador() {
+  const n = operadorActual();
+  document.body.classList.toggle('con-op', !!n);
+  if (n) {
+    const c = colorOperador(n);
+    document.documentElement.style.setProperty('--op', c);
+    document.documentElement.style.setProperty('--op-texto', textoSobre(c));
+  }
+}
+function ponerOperador(sel, nombre) {
+  if (nombre && ![...sel.options].some((o) => o.value === nombre)) sel.add(new Option(nombre, nombre)); // dado de baja
+  sel.value = nombre || '';
+}
+function pintarSelectsOperador() {
+  const opts = operadores.map((o) => `<option value="${esc(o.nombre)}">${esc(o.nombre)}</option>`).join('');
+  const actual = operadorActual();
+  $('#selOperador').innerHTML = `<option value="">${operadores.length ? '— Elige —' : '(sin operadores)'}</option>` + opts;
+  $('#selOperador').value = actual;
+  $$('.sel-operador').forEach((sel) => {
+    const prev = sel.value;
+    sel.innerHTML = '<option value="">—</option>' + opts;
+    sel.required = operadores.length > 0;
+    ponerOperador(sel, prev || actual);
+  });
+  const nombres = [...new Set([...operadores.map((o) => o.nombre), ...registros.map((r) => r.operador).filter(Boolean)])];
+  for (const [id, todos] of [['#buscaOperador', 'Todos'], ['#filtroOperadorAgenda', 'Todos los operadores']]) {
+    const sel = $(id); const prev = sel.value;
+    sel.innerHTML = `<option value="">${todos}</option>` + nombres.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join('');
+    sel.value = nombres.includes(prev) ? prev : '';
+  }
+  $('#filtroOperadorAgenda').classList.toggle('hidden', !nombres.length);
+  aplicarTemaOperador();
+}
+function pintarOperadores() {
+  $('#listaOperadores').innerHTML = operadores.length ? operadores.map((o, i) => `
+    <div class="prov">
+      <div class="info">${badgeOp(o.nombre)}</div>
+      <div class="row tight">
+        <button class="btn ghost small" data-op="editar" data-i="${i}">Editar</button>
+        <button class="btn ghost small danger" data-op="borrar" data-i="${i}">Dar de baja</button>
+      </div>
+    </div>`).join('') : '<p class="muted">Aún no hay operadores. Da de alta al primero aquí abajo.</p>';
+  pintarSelectsOperador();
+}
+function guardarOperadores() {
+  store.set('operadores', operadores);
+  guardarEnHoja('Operadores', operadores.map((o) => [o.nombre, o.color]));
+  pintarOperadores();
+}
+function resetFormOperador() {
+  const f = $('#formOperador'); f.reset(); f.idx.value = '';
+  f.color.value = PALETA.find((c) => !operadores.some((o) => o.color.toLowerCase() === c)) || PALETA[0];
+  $('#btnGuardarOperador').textContent = 'Dar de alta';
+  $('#btnCancelarOperador').classList.add('hidden');
+}
+$('#paletaOperador').innerHTML = PALETA.map((c) => `<button type="button" class="swatch" data-color="${c}" style="background:${c}" aria-label="Color ${c}"></button>`).join('');
+$('#paletaOperador').addEventListener('click', (e) => { const b = e.target.closest('[data-color]'); if (b) $('#formOperador').color.value = b.dataset.color; });
+$('#btnCancelarOperador').addEventListener('click', resetFormOperador);
+$('#formOperador').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const f = e.target;
+  const nombre = f.nombre.value.trim();
+  const idx = f.idx.value === '' ? -1 : Number(f.idx.value);
+  if (operadores.some((o, i) => i !== idx && norm(o.nombre) === norm(nombre))) { toast('Ya hay un operador con ese nombre.'); return; }
+  const nuevo = { nombre, color: colorValido(f.color.value) };
+  if (idx >= 0) {
+    if (operadores[idx].nombre === store.get('operador', '')) store.set('operador', nombre);
+    operadores[idx] = nuevo;
+  } else {
+    operadores.push(nuevo);
+    if (!operadorActual()) store.set('operador', nombre);
+  }
+  guardarOperadores(); resetFormOperador(); toast(idx >= 0 ? 'Operador actualizado' : `${nombre} dado de alta`);
+});
+document.addEventListener('click', (e) => {
+  const a = e.target.closest('[data-op]');
+  if (!a) return;
+  const i = Number(a.dataset.i);
+  const o = operadores[i];
+  if (a.dataset.op === 'borrar') {
+    if (!confirm(`¿Dar de baja a "${o.nombre}"?\nLas visitas y citas que ya tienen su nombre lo conservan.`)) return;
+    operadores.splice(i, 1);
+    if (store.get('operador', '') === o.nombre) store.set('operador', '');
+    guardarOperadores();
+  } else {
+    const f = $('#formOperador');
+    f.idx.value = i; f.nombre.value = o.nombre; f.color.value = o.color;
+    $('#btnGuardarOperador').textContent = 'Guardar cambios';
+    $('#btnCancelarOperador').classList.remove('hidden');
+    f.nombre.focus();
+  }
+});
+$('#selOperador').addEventListener('change', (e) => {
+  store.set('operador', e.target.value);
+  if (!formReg.id.value) ponerOperador(formReg.operador, e.target.value); // no se toca una visita en edición
+  ponerOperador(formCita.operador, e.target.value);
+  aplicarTemaOperador();
+});
+
+/* =====================================================================
+   FOTOS (Google Drive, carpeta "Agenda Ferretería – Fotos")
+   Cada foto lleva en sus propiedades la ficha a la que pertenece:
+   reg:<id> para visitas del registro, ev:<id> para citas y reparaciones.
+   ===================================================================== */
+let carpetaId = store.get('carpetaFotos', '');
+let fotosPorRef = new Map();
+const miniaturas = new Map(); // id de foto -> URL local de la imagen ya descargada
+let fotoRef = '', fotoTitulo = '', fotoTimer = null, fotoPendiente = null;
+const qEsc = (s) => String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+
+async function carpetaFotos() {
+  if (carpetaId) return carpetaId;
+  const q = `name='${qEsc(NOMBRE_CARPETA)}' and mimeType='application/vnd.google-apps.folder' and trashed=false`;
+  const r = await api(`${DRIVE_API}?q=${encodeURIComponent(q)}&fields=files(id)&orderBy=createdTime`);
+  carpetaId = r.files?.[0]?.id
+    || (await api(`${DRIVE_API}?fields=id`, { method: 'POST', body: JSON.stringify({ name: NOMBRE_CARPETA, mimeType: 'application/vnd.google-apps.folder' }) })).id;
+  store.set('carpetaFotos', carpetaId);
+  return carpetaId;
+}
+async function listarFotos(extraQ) {
+  const carpeta = await carpetaFotos();
+  const res = [];
+  let pageToken = '';
+  do {
+    const q = `'${qEsc(carpeta)}' in parents and trashed=false${extraQ ? ' and ' + extraQ : ''}`;
+    const r = await api(`${DRIVE_API}?q=${encodeURIComponent(q)}&pageSize=1000&orderBy=createdTime&fields=nextPageToken,files(id,description,appProperties,createdTime,webViewLink)${pageToken ? '&pageToken=' + encodeURIComponent(pageToken) : ''}`);
+    res.push(...(r.files || []));
+    pageToken = r.nextPageToken || '';
+  } while (pageToken);
+  return res;
+}
+async function cargarFotos(reintento = true) {
+  try {
+    const mapa = new Map();
+    (await listarFotos()).forEach((f) => {
+      const ref = f.appProperties?.fr_ref;
+      if (!ref) return;
+      if (!mapa.has(ref)) mapa.set(ref, []);
+      mapa.get(ref).push(f);
+    });
+    fotosPorRef = mapa;
+  } catch (e) {
+    if (reintento && e.status === 404) { carpetaId = ''; store.set('carpetaFotos', ''); return cargarFotos(false); } // carpeta borrada
+    throw e;
+  }
+}
+const numFotos = (ref) => fotosPorRef.get(ref)?.length || 0;
+function botonFotos(ref, titulo) {
+  const n = numFotos(ref);
+  return `<button class="btn ghost small" data-fotos="${esc(ref)}" data-titulo="${esc(titulo)}">📷 Fotos${n ? ` (${n})` : ''}</button>`;
+}
+function repintarConFotos() {
+  pintarRegistros();
+  if (vista === 'mes' && eventosMes.length) pintarMes();
+}
+
+// Reduce la foto (máx. 1600 px, JPEG) para que suba rápido desde el móvil.
+async function comprimir(file) {
+  try {
+    const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
+    const k = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
+    const c = document.createElement('canvas');
+    c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+    c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+    return await new Promise((res) => c.toBlob((b) => res(b || file), 'image/jpeg', 0.82));
+  } catch { return file; } // formato que el navegador no sabe leer: se sube tal cual
+}
+async function subirFoto(file, ref, descripcion) {
+  const blob = await comprimir(file);
+  const carpeta = await carpetaFotos();
+  const ahora = new Date();
+  const ext = blob.type === 'image/jpeg' ? 'jpg' : (blob.type.split('/')[1] || 'jpg');
+  const meta = {
+    name: `${ref.replace(/[^\w-]/g, '_')}_${claveDia(ahora)}_${pad(ahora.getHours())}${pad(ahora.getMinutes())}${pad(ahora.getSeconds())}.${ext}`,
+    parents: [carpeta],
+    description: descripcion,
+    appProperties: { fr_ref: ref, fr_operador: operadorActual().slice(0, 40) },
+  };
+  const limite = 'frlimite' + Date.now();
+  const cuerpo = new Blob([
+    `--${limite}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n--${limite}\r\nContent-Type: ${blob.type || 'image/jpeg'}\r\n\r\n`,
+    blob, `\r\n--${limite}--`,
+  ]);
+  return api('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', {
+    method: 'POST', body: cuerpo, headers: { 'Content-Type': `multipart/related; boundary=${limite}` },
+  });
+}
+async function borrarFotosDe(ref) {
+  const fotos = fotosPorRef.get(ref) || [];
+  for (const f of fotos) { try { await api(`${DRIVE_API}/${encodeURIComponent(f.id)}`, { method: 'DELETE' }); } catch { /* */ } }
+  fotosPorRef.delete(ref);
+}
+async function urlMiniatura(id) {
+  if (miniaturas.has(id)) return miniaturas.get(id);
+  if (!token || Date.now() > tokenExpira) await pedirToken(false);
+  const r = await fetch(`${DRIVE_API}/${encodeURIComponent(id)}?alt=media`, { headers: { Authorization: 'Bearer ' + token } });
+  if (!r.ok) throw new Error('No se pudo cargar la foto');
+  const url = URL.createObjectURL(await r.blob());
+  miniaturas.set(id, url);
+  return url;
+}
+
+async function abrirFotos(ref, titulo) {
+  fotoRef = ref; fotoTitulo = titulo;
+  $('#fotosTitulo').textContent = titulo;
+  $('#fotoDesc').value = ''; $('#fotoEstado').textContent = '';
+  $('#fotosQR').open = false;
+  pintarQR('#qrFoto', enlaceApp({ foto: ref, t: titulo }));
+  if (!$('#dlgFotos').open) $('#dlgFotos').showModal();
+  await refrescarFotos();
+  clearInterval(fotoTimer);
+  // Mientras el código QR está a la vista, se comprueba cada pocos segundos si llegan fotos del móvil.
+  fotoTimer = setInterval(() => { if ($('#fotosQR').open) refrescarFotos(true); }, 5000);
+}
+async function refrescarFotos(silencioso) {
+  const grid = $('#fotosGrid');
+  if (!silencioso) grid.innerHTML = '<p class="muted small">Cargando fotos…</p>';
+  try {
+    const fotos = await listarFotos(`appProperties has { key='fr_ref' and value='${qEsc(fotoRef)}' }`);
+    const antes = (fotosPorRef.get(fotoRef) || []).map((f) => f.id).join();
+    if (fotos.length) fotosPorRef.set(fotoRef, fotos); else fotosPorRef.delete(fotoRef);
+    if (silencioso && antes === fotos.map((f) => f.id).join()) return;
+    grid.innerHTML = fotos.length ? fotos.map((f) => `
+      <div class="foto">
+        <img data-foto="${esc(f.id)}" alt="${esc(f.description || 'Foto')}">
+        <div class="pie">${esc(f.description || '')}${f.description ? ' · ' : ''}${esc(new Date(f.createdTime).toLocaleDateString('es-ES'))}</div>
+        <div class="acc">
+          <a href="${esc(f.webViewLink || '#')}" target="_blank" rel="noopener">Abrir</a>
+          <button type="button" class="btn ghost small danger" data-borrarfoto="${esc(f.id)}">Borrar</button>
+        </div>
+      </div>`).join('') : '<p class="muted small">Todavía no hay fotos.</p>';
+    $$('img[data-foto]', grid).forEach((img) => urlMiniatura(img.dataset.foto).then((u) => { img.src = u; }).catch(() => { img.alt = 'No se pudo cargar'; }));
+  } catch (e) { if (!silencioso) grid.innerHTML = `<p class="muted small">${esc(e.message)}</p>`; }
+}
+async function alElegirFotos(e) {
+  const files = [...e.target.files];
+  e.target.value = '';
+  if (!files.length) return;
+  const desc = $('#fotoDesc').value.trim();
+  try {
+    for (let i = 0; i < files.length; i++) {
+      $('#fotoEstado').textContent = files.length > 1 ? `Subiendo foto ${i + 1} de ${files.length}…` : 'Subiendo foto…';
+      await subirFoto(files[i], fotoRef, desc);
+    }
+    $('#fotoEstado').textContent = files.length > 1 ? `${files.length} fotos guardadas.` : 'Foto guardada.';
+    $('#fotoDesc').value = '';
+    await refrescarFotos();
+  } catch (err) { $('#fotoEstado').textContent = err.message; }
+}
+$('#fotoCamara').addEventListener('change', alElegirFotos);
+$('#fotoDesc').addEventListener('keydown', (e) => { if (e.key === 'Enter') e.preventDefault(); }); // Intro no cierra la ventana
+$('#fotoGaleria').addEventListener('change', alElegirFotos);
+$('#dlgFotos').addEventListener('close', () => { clearInterval(fotoTimer); repintarConFotos(); });
+$('#fotosQR').addEventListener('toggle', () => { if ($('#fotosQR').open) refrescarFotos(true); });
+
+document.addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-fotos]');
+  if (b) { if (!token) { toast('Conecta con Google primero.'); return; } abrirFotos(b.dataset.fotos, b.dataset.titulo); return; }
+  const d = e.target.closest('[data-borrarfoto]');
+  if (d) {
+    if (!confirm('¿Borrar esta foto?')) return;
+    try { await api(`${DRIVE_API}/${encodeURIComponent(d.dataset.borrarfoto)}`, { method: 'DELETE' }); refrescarFotos(); }
+    catch (err) { toast(err.message); }
+  }
+});
+
+/* =====================================================================
+   ENLACES Y CÓDIGOS QR (para usar el móvil)
+   ===================================================================== */
+const URL_APP = location.origin + location.pathname;
+function enlaceApp(params) {
+  return URL_APP + '#' + new URLSearchParams({ cid: store.get('clientId', ''), ...params }).toString();
+}
+function pintarQR(sel, texto) {
+  const el = $(sel);
+  if (!window.qrcode) { el.textContent = 'No se pudo generar el código QR.'; return; }
+  const qr = qrcode(0, 'M');
+  qr.addData(texto);
+  qr.make();
+  el.innerHTML = qr.createSvgTag({ cellSize: 4, margin: 2, scalable: true });
+}
+function pintarQRConfig() {
+  if (!store.get('clientId', '')) { $('#qrConfig').innerHTML = '<p class="muted small">Guarda primero el ID de cliente de Google.</p>'; return; }
+  pintarQR('#qrConfig', enlaceApp({}));
+}
+// Lee el enlace con el que se abrió la app (#cid=…&foto=…&t=…) y lo borra de la barra de direcciones.
+function leerEnlace() {
+  if (!location.hash.includes('=')) return;
+  const p = new URLSearchParams(location.hash.slice(1));
+  const cid = p.get('cid') || '';
+  const actual = store.get('clientId', '');
+  if (cid.endsWith('.apps.googleusercontent.com') && cid !== actual
+      && (!actual || confirm('Este enlace trae otro ID de cliente de Google. ¿Usarlo en este dispositivo?'))) {
+    store.set('clientId', cid); $('#inpClientId').value = cid; tokenClient = null;
+  }
+  const foto = p.get('foto');
+  if (foto) {
+    fotoPendiente = { ref: foto, titulo: p.get('t') || '' };
+    $('#avisoFoto').textContent = `Pulsa "Conectar con Google" para añadir fotos a: ${fotoPendiente.titulo || 'la ficha'}`;
+    $('#avisoFoto').classList.remove('hidden');
+  }
+  history.replaceState(null, '', location.pathname + location.search);
+}
 
 /* =====================================================================
    LLAVES EN BRUTO: proveedores
@@ -1106,7 +1460,12 @@ $('#inpImportar').addEventListener('change', async (e) => {
 /* =====================================================================
    ARRANQUE
    ===================================================================== */
+leerEnlace();
+pintarOperadores();
+resetFormOperador();
+pintarQRConfig();
 resetFormRegistro();
+ponerOperador(formCita.operador, operadorActual());
 camposPorTipo();
 pintarVista();
 pintarEtiquetas();

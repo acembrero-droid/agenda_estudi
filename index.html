@@ -10,6 +10,11 @@
 <body>
   <header class="top">
     <h1>Agenda Ferretería</h1>
+    <div class="operador-box">
+      <label class="op-label">Operador
+        <select id="selOperador"><option value="">— Elige —</option></select>
+      </label>
+    </div>
     <div class="auth">
       <span id="authEstado" class="muted">Sin conectar</span>
       <button id="btnConectar" class="btn">Conectar con Google</button>
@@ -25,6 +30,7 @@
     <button class="tab" data-tab="ajustes">Ajustes</button>
   </nav>
 
+  <div id="avisoFoto" class="aviso-banner hidden"></div>
   <datalist id="dlClientes"></datalist>
 
   <main>
@@ -42,6 +48,7 @@
             <label>Cliente <input name="cliente" list="dlClientes" autocomplete="off" placeholder="Nombre"></label>
             <label>Teléfono <input name="telefono" type="tel" placeholder="600 000 000"></label>
           </div>
+          <label>Atendido por <select name="operador" class="sel-operador"></select></label>
           <label>Qué necesita <textarea name="necesidad" rows="3" required placeholder="Ej.: Grifo monomando para fregadero, que encaje en agujero de 35 mm"></textarea></label>
           <div class="campo">
             <span class="campo-label">Etiquetas</span>
@@ -81,6 +88,7 @@
                 <option>Resuelto</option>
               </select>
             </label>
+            <label>Operador <select id="buscaOperador"><option value="">Todos</option></select></label>
             <label>Desde <input id="buscaDesde" type="date"></label>
             <label>Hasta <input id="buscaHasta" type="date"></label>
           </div>
@@ -132,9 +140,8 @@
             <label>Cliente <input name="cliente" list="dlClientes" autocomplete="off" placeholder="Nombre"></label>
             <label>Teléfono <input name="telefono" type="tel" placeholder="600 000 000"></label>
           </div>
-          <div id="camposVisita" class="hidden">
-            <label>Dirección <input name="direccion" placeholder="Calle, número, piso, población"></label>
-          </div>
+          <label>Dirección <input name="direccion" placeholder="Calle, número, piso, población (opcional)"></label>
+          <label>Operador asignado <select name="operador" class="sel-operador"></select></label>
           <div id="camposReparacion" class="hidden">
             <div class="row">
               <label>Artículo <input name="articulo" placeholder="Ej.: Taladro Bosch, cerradura…"></label>
@@ -167,6 +174,7 @@
                 <option value="ferreteria">Citas en tienda</option>
                 <option value="reparacion">Reparaciones</option>
               </select>
+              <select id="filtroOperadorAgenda"><option value="">Todos los operadores</option></select>
               <select id="rangoAgenda">
                 <option value="7">7 días</option>
                 <option value="30" selected>30 días</option>
@@ -277,6 +285,28 @@
         <button id="btnGuardarClientId" class="btn" type="button">Guardar</button>
       </div>
       <div class="card">
+        <h2>Operadores</h2>
+        <p class="muted small">Las personas que atienden la tienda. Cada una tiene un color: al elegirla arriba, la app cambia de color para que se vea claramente quién la está usando. Su nombre queda guardado en cada visita y cita.</p>
+        <div id="listaOperadores" class="lista"></div>
+        <form id="formOperador" class="sub-form">
+          <input type="hidden" name="idx">
+          <div class="row">
+            <label>Nombre <input name="nombre" required placeholder="Ej.: Ana"></label>
+            <label class="color-label">Color <input name="color" type="color" value="#2563eb"></label>
+          </div>
+          <div id="paletaOperador" class="chips"></div>
+          <div class="row tight">
+            <button class="btn" type="submit" id="btnGuardarOperador">Dar de alta</button>
+            <button class="btn ghost hidden" type="button" id="btnCancelarOperador">Cancelar</button>
+          </div>
+        </form>
+      </div>
+      <div class="card">
+        <h2>Usar la app en el móvil</h2>
+        <p class="muted small">Escanea este código con la cámara del móvil: abre la app con el ID de Google ya puesto. Después pulsa "Conectar con Google" con la misma cuenta de Google.</p>
+        <div id="qrConfig" class="qr-box"></div>
+      </div>
+      <div class="card">
         <h2>Datos del negocio</h2>
         <label>Nombre del negocio (para los mensajes de WhatsApp)
           <input id="inpTienda" placeholder="Ej.: Ferretería López">
@@ -298,7 +328,7 @@
       </div>
       <div class="card">
         <h2>Plantillas de WhatsApp</h2>
-        <p class="muted small">Datos que se rellenan solos: <code>{cliente}</code> <code>{fecha}</code> <code>{hora}</code> <code>{articulo}</code> <code>{presupuesto}</code> <code>{direccion}</code> <code>{necesidad}</code> <code>{tienda}</code>. Si un dato está vacío, la línea que lo contiene no se incluye (salvo <code>{cliente}</code> y <code>{tienda}</code>).</p>
+        <p class="muted small">Datos que se rellenan solos: <code>{cliente}</code> <code>{fecha}</code> <code>{hora}</code> <code>{articulo}</code> <code>{presupuesto}</code> <code>{direccion}</code> <code>{necesidad}</code> <code>{tienda}</code> <code>{operador}</code>. Si un dato está vacío, la línea que lo contiene no se incluye (salvo <code>{cliente}</code> y <code>{tienda}</code>).</p>
         <div id="listaPlantillas" class="lista"></div>
         <form id="formPlantilla" class="sub-form">
           <input type="hidden" name="idx">
@@ -328,7 +358,30 @@
     </form>
   </dialog>
 
+  <!-- Diálogo fotos -->
+  <dialog id="dlgFotos">
+    <form method="dialog" class="dlg">
+      <h2>Fotos · <span id="fotosTitulo"></span></h2>
+      <div id="fotosGrid" class="fotos-grid"></div>
+      <label>Descripción de la foto (opcional) <input id="fotoDesc" placeholder="Ej.: medida del hueco, referencia de la pieza…"></label>
+      <div class="row tight">
+        <label class="btn file">📷 Hacer foto<input id="fotoCamara" type="file" accept="image/*" capture="environment" hidden></label>
+        <label class="btn ghost file">Elegir de la galería<input id="fotoGaleria" type="file" accept="image/*" multiple hidden></label>
+      </div>
+      <p id="fotoEstado" class="muted small"></p>
+      <details id="fotosQR" class="ayuda">
+        <summary>Hacer la foto con el móvil (código QR)</summary>
+        <div id="qrFoto" class="qr-box"></div>
+        <p class="muted small">Escanéalo con la cámara del móvil, pulsa "Conectar con Google" y haz la foto. Aparecerá aquí sola en unos segundos.</p>
+      </details>
+      <div class="row tight">
+        <button class="btn ghost" value="cerrar" formnovalidate>Cerrar</button>
+      </div>
+    </form>
+  </dialog>
+
   <div id="toast" class="toast hidden"></div>
+  <script src="vendor/qrcode.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
